@@ -129,15 +129,15 @@ class CarlaEnv:
         velocity = self.car.get_velocity()
         speed = int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
 
-        if speed < 0:
+        if speed <= 0:
             done = 0
             reward = -10
         elif speed < 50:
             done = 0
-            reward = 5
+            reward = 1
         elif speed > 50:
             done = 0
-            reward = 10
+            reward = 20
 
         if len(self.collision_hist) != 0:
             done = 1
@@ -152,18 +152,15 @@ class CarlaEnv:
         """
         Spawns actor-vehicle to be controled.
         """
-
+        self.car = None
         car_bp = self.world.get_blueprint_library().filter('model3')[0]
-
-        try:
-            #location = random.choice(self.world.get_map().get_spawn_points())
-            location = self.world.get_map().get_spawn_points()
-            self.car = self.world.spawn_actor(car_bp, location[0])
-        except:
-            time.sleep(4)
-
-            location = random.choice(self.world.get_map().get_spawn_points())
-            self.car = self.world.spawn_actor(car_bp, location)
+        spawn_points = self.world.get_map().get_spawn_points()
+        while self.car is None:
+            try:
+                loc = random.randint(0, len(spawn_points))
+                self.car = self.world.spawn_actor(car_bp, spawn_points[loc])
+            except:
+                time.sleep(4)
 
     def setup_camera(self):
         """
@@ -294,6 +291,7 @@ def main():
         episode_reward_history = []
         running_reward = 0
         optimizer = optim.Adam(model.parameters(), lr=ALPHA)
+        criterion = nn.MSELoss()
         epsilon = 1
 
         for episode_count in range(EPISODES):
@@ -318,11 +316,12 @@ def main():
             
                 state_next, reward, done, _ = env.step(action)
                 episode_reward += reward
-
-                replay_history.append([action, state, state_next, reward, done])
+                if state is not None and state_next is not None:
+                    replay_history.append([action, state, state_next, reward, done])
+                
                 state = state_next
 
-                if timestep_count % UPDATE_ACTION_AFTER == 1 and len(replay_history) > MIN_REPLAY_MEMORY_SIZE:
+                if timestep_count % UPDATE_ACTION_AFTER == 0 and len(replay_history) > MIN_REPLAY_MEMORY_SIZE:
                     #action_s, state_s, state_next_s, reward_s, done_s = random.sample(replay_history, TRAINING_BATCH_SIZE)
                     sample = random.sample(replay_history, TRAINING_BATCH_SIZE)
                     action_s = []
@@ -350,17 +349,15 @@ def main():
                     done_s = torch.tensor(done_s)
                     done_s = done_s.to('cuda')
 
-                    with torch.no_grad():
-                        Q_next_state = torch.max(model_target(state_next_s/255.0), axis = 1)
-                    Q_target = reward_s + DISCOUNT * Q_next_state * (1 - done_s)
+                    Q_next_state, _ = torch.max(model_target(state_next_s/255.0), axis = 1)
+                    Q_target = reward_s + DISCOUNT * Q_next_state * (1.0 - done_s)
                     relevant_actions = F.one_hot(action_s, num_classes=3)
-                    with torch.no_grad():
-                        Q_values = model(state_s/255.0)
-                        Q_actions = torch.sum(torch.mul(Q_values, relevant_actions), axis = 1)
-
-                    loss = nn.MSELoss(Q_target, Q_actions)
+                    relevant_actions = relevant_actions.to('cuda')
+                    Q_values = model(state_s/255.0)
+                    Q_actions = torch.sum(torch.mul(Q_values, relevant_actions), axis = 1)
 
                     optimizer.zero_grad() # for model
+                    loss = criterion(Q_target, Q_actions)
                     loss.backward() # for model
                     optimizer.step() # for model
 
