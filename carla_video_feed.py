@@ -1,23 +1,5 @@
 #!/usr/bin/env python
 
-# Copyright (c) 2019 Aptiv
-#
-# This work is licensed under the terms of the MIT license.
-# For a copy, see <https://opensource.org/licenses/MIT>.
-
-"""
-An example of client-side bounding boxes with basic car controls.
-
-Controls:
-
-    W            : throttle
-    S            : brake
-    AD           : steer
-    Space        : hand-brake
-
-    ESC          : quit
-"""
-
 # ==============================================================================
 # -- find carla module ---------------------------------------------------------
 # ==============================================================================
@@ -47,17 +29,6 @@ import carla
 
 import weakref
 import random
-
-try:
-    import pygame
-    from pygame.locals import K_ESCAPE
-    from pygame.locals import K_SPACE
-    from pygame.locals import K_a
-    from pygame.locals import K_d
-    from pygame.locals import K_s
-    from pygame.locals import K_w
-except ImportError:
-    raise RuntimeError('cannot import pygame, make sure pygame package is installed')
 
 try:
     import numpy as np
@@ -94,10 +65,6 @@ MIN_EPSILON = 0.001
 
 AGGREGATE_STATS_EVERY = 10
 
-# ==============================================================================
-# -- BasicSynchronousClient ----------------------------------------------------
-# ==============================================================================
-
 class CarlaEnv:
     def __init__(self):
         self.client = None
@@ -108,6 +75,8 @@ class CarlaEnv:
         self.display = None
         self.image = None
         self.capture = True
+
+        self.preview = False
         self.collision_hist = []
 
     def reset(self):
@@ -128,11 +97,11 @@ class CarlaEnv:
         time.sleep(4)
 
         self.episode_start = time.time()
-        self.car.apply_control(control)
-
-        return self.render_dash(self.display)
+        return self.render(self.display)
 
     def step(self, action):
+        self.world.tick()
+        self.capture = True
         control = self.car.get_control()
 
         if action == 0:
@@ -149,12 +118,9 @@ class CarlaEnv:
         self.car.apply_control(control)
 
         velocity = self.car.get_velocity()
-        speed = int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)) 
+        speed = int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
 
-        if len(self.collision_hist) != 0:
-            done = True
-            reward = -200
-        elif speed < 0:
+        if speed < 0:
             done = False
             reward = -10
         elif speed < 50:
@@ -164,10 +130,14 @@ class CarlaEnv:
             done = False
             reward = 10
 
+        if len(self.collision_hist) != 0:
+            done = True
+            reward = -200
+
         if self.episode_start + SECONDS_PER_EPISODE < time.time():
             done = True
         
-        return self.render_dash(self.display), reward, done, None
+        return self.render(self.display), reward, done, None
     
     def setup_car(self):
         """
@@ -202,7 +172,7 @@ class CarlaEnv:
 
     def setup_collision_sensor(self):
         self.collision_hist = []
-        
+
         collision_bp = self.world.get_blueprint_library().find('sensor.other.collision')
         self.collision_sensor = self.client.get_world().spawn_actor(collision_bp, carla.Transform(), attach_to=self.car)
         self.collision_sensor.listen(lambda event: self.collision_data(event))
@@ -234,57 +204,17 @@ class CarlaEnv:
             self.capture = False
 
     def render(self, display):
-        """
-        Transforms image from camera sensor and blits it to main pygame display.
-        """
         if self.image is not None:
             array = np.frombuffer(self.image.raw_data, dtype=np.dtype("uint8"))
             array = np.reshape(array, (self.image.height, self.image.width, 4))
             array = array[:, :, :3]
-            array = array[:, :, ::-1]
-            surface = pygame.surfarray.make_surface(array.swapaxes(0, 1))
-            display.blit(surface, (0, 0))
-
-    def render_dash(self, display):
-        if self.image is not None:
-            array = np.frombuffer(self.image.raw_data, dtype=np.dtype("uint8"))
-            array = np.reshape(array, (self.image.height, self.image.width, 4))
-            array = array[:, :, :3]
-            cv2.imshow("Video Feed", array)
-            cv2.waitKey(1)
+            if self.preview:
+                cv2.imshow("preview", array)
+                cv2.waitKey(1)
             return array
         return None
-    
-    def game_loop(self):
-        """
-        Main program loop.
-        """
 
-        pygame.init()
-
-        try:
-            self.display = pygame.display.set_mode((VIEW_WIDTH, VIEW_HEIGHT), pygame.HWSURFACE | pygame.DOUBLEBUF)
-            #pygame_clock = pygame.time.Clock()
-
-            self.set_synchronous_mode(True)
-            while True:
-                self.world.tick()
-
-                self.capture = True
-                #pygame_clock.tick_busy_loop(20)
-
-                self.render(self.display)
-                self.render_dash(self.display)
-                self.step(0)
-                pygame.display.flip()
-
-                pygame.event.pump()
-
-        finally:
-            self.set_synchronous_mode(False)
-            self.camera.destroy()
-            self.car.destroy()
-            pygame.quit()
+        
 
 def main():
     """
@@ -294,7 +224,17 @@ def main():
     try:
         client = CarlaEnv()
         client.reset()
-        client.game_loop()
+        
+        try:
+            client.set_synchronous_mode(True)
+            client.preview = True
+            while True:
+                state = client.step(0)
+
+        finally:
+            client.set_synchronous_mode(False)
+            client.camera.destroy()
+            client.car.destroy()
     finally:
         print('EXIT')
 
