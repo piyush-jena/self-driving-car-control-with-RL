@@ -52,7 +52,7 @@ IM_WIDTH = 640
 IM_HEIGHT = 480
 SECONDS_PER_EPISODE = 10
 REPLAY_MEMORY_SIZE = 5_000
-MIN_REPLAY_MEMORY_SIZE = 1_000
+MIN_REPLAY_MEMORY_SIZE = 1_00
 MINIBATCH_SIZE = 16
 PREDICTION_BATCH_SIZE = 1
 TRAINING_BATCH_SIZE = MINIBATCH_SIZE // 4
@@ -110,6 +110,8 @@ class CarlaEnv:
         self.world.tick()
         self.capture = True
         control = self.car.get_control()
+        reward = 0
+        done = 0
 
         if action == 0:
             control.throttle = 1
@@ -128,21 +130,21 @@ class CarlaEnv:
         speed = int(3.6 * math.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2))
 
         if speed < 0:
-            done = False
+            done = 0
             reward = -10
         elif speed < 50:
-            done = False
+            done = 0
             reward = 5
         elif speed > 50:
-            done = False
+            done = 0
             reward = 10
 
         if len(self.collision_hist) != 0:
-            done = True
+            done = 1
             reward = -200
 
         if self.episode_start + SECONDS_PER_EPISODE < time.time():
-            done = True
+            done = -1
         
         return self.render(self.display), reward, done, None
     
@@ -151,9 +153,17 @@ class CarlaEnv:
         Spawns actor-vehicle to be controled.
         """
 
-        car_bp = self.world.get_blueprint_library().filter('vehicle.*')[0]
-        location = random.choice(self.world.get_map().get_spawn_points())
-        self.car = self.world.spawn_actor(car_bp, location)
+        car_bp = self.world.get_blueprint_library().filter('model3')[0]
+
+        try:
+            #location = random.choice(self.world.get_map().get_spawn_points())
+            location = self.world.get_map().get_spawn_points()
+            self.car = self.world.spawn_actor(car_bp, location[0])
+        except:
+            time.sleep(4)
+
+            location = random.choice(self.world.get_map().get_spawn_points())
+            self.car = self.world.spawn_actor(car_bp, location)
 
     def setup_camera(self):
         """
@@ -161,8 +171,8 @@ class CarlaEnv:
         Sets calibration for client-side boxes rendering.
         """
         camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
-        camera_bp.set_attribute('image_size_x', str(VIEW_WIDTH))
-        camera_bp.set_attribute('image_size_y', str(VIEW_HEIGHT))
+        camera_bp.set_attribute('image_size_x', str(IM_WIDTH))
+        camera_bp.set_attribute('image_size_y', str(IM_HEIGHT))
         camera_bp.set_attribute('fov', str(VIEW_FOV))
 
         #camera_transform = carla.Transform(carla.Location(x=-5.5, z=2.8), carla.Rotation(pitch=-15))
@@ -223,9 +233,6 @@ class CarlaEnv:
             return array/255.0
         return None
 
-import torch
-import torch.nn as nn
-
 class LeNet(nn.Module):
     def __init__(self):
         super(LeNet, self).__init__()
@@ -285,12 +292,11 @@ def main():
 
         replay_history = []
         episode_reward_history = []
-        episode_count = 0
         running_reward = 0
         optimizer = optim.Adam(model.parameters(), lr=ALPHA)
         epsilon = 1
 
-        for episode in range(EPISODES):
+        for episode_count in range(EPISODES):
             state = env.reset()
             episode_reward = 0
             timestep_count = 0
@@ -306,8 +312,8 @@ def main():
                     state_t = state_t.unsqueeze(0)
                     state_t = state_t.permute(0, 3, 1, 2)
                     state_t = state_t.to('cuda')
-                    
-                    action_vals = model(state_t)
+                    with torch.no_grad():
+                        action_vals = model(state_t)
                     action = torch.argmax(action_vals[0])
             
                 state_next, reward, done, _ = env.step(action)
@@ -316,8 +322,21 @@ def main():
                 replay_history.append([action, state, state_next, reward, done])
                 state = state_next
 
-                if timestep_count % UPDATE_ACTION_AFTER == 0 and len(replay_history) > MIN_REPLAY_MEMORY_SIZE:
-                    action_s, state_s, state_next_s, reward_s, done_s = random.sample(replay_history)
+                if timestep_count % UPDATE_ACTION_AFTER == 1 and len(replay_history) > MIN_REPLAY_MEMORY_SIZE:
+                    #action_s, state_s, state_next_s, reward_s, done_s = random.sample(replay_history, TRAINING_BATCH_SIZE)
+                    sample = random.sample(replay_history, TRAINING_BATCH_SIZE)
+                    action_s = []
+                    reward_s = []
+                    action_s = []
+                    state_s = []
+                    state_next_s = []
+                    done_s = []
+                    for action_sa, state_sa, state_next_sa, reward_sa, done_sa in sample:
+                        state_next_s.append(state_next_sa)
+                        reward_s.append(reward_sa)
+                        action_s.append(action_sa)
+                        state_s.append(state_sa)
+                        done_s.append(done_sa)
                     
                     state_next_s = torch.tensor(state_next_s)
                     state_next_s = state_next_s.permute(0, 3, 1, 2)
@@ -328,12 +347,16 @@ def main():
                     state_s = torch.tensor(state_s)
                     state_s = state_s.permute(0, 3, 1, 2)
                     state_s = state_s.to('cuda')
+                    done_s = torch.tensor(done_s)
+                    done_s = done_s.to('cuda')
 
-                    Q_next_state = torch.max(model_target(state_next_s/255.0), axis = 1)
-                    Q_target = reward_s + DISCOUNT * Q_next_state
+                    with torch.no_grad():
+                        Q_next_state = torch.max(model_target(state_next_s/255.0), axis = 1)
+                    Q_target = reward_s + DISCOUNT * Q_next_state * (1 - done_s)
                     relevant_actions = F.one_hot(action_s, num_classes=3)
-                    Q_values = model(state_s/255.0)
-                    Q_actions = torch.sum(torch.mul(Q_values, relevant_actions), axis = 1)
+                    with torch.no_grad():
+                        Q_values = model(state_s/255.0)
+                        Q_actions = torch.sum(torch.mul(Q_values, relevant_actions), axis = 1)
 
                     loss = nn.MSELoss(Q_target, Q_actions)
 
@@ -343,8 +366,6 @@ def main():
 
                 if timestep_count % UPDATE_TARGET_EVERY == 0:
                     model_target.load_state_dict(model.state_dict())
-                    template = "running reward: {:.2f} at episode {}, frame count {}, epsilon {}"
-                    print(template.format(running_reward, episode_count, timestep_count, epsilon))
 
                 if len(replay_history) > REPLAY_MEMORY_SIZE:
                     del replay_history[:1]
@@ -355,7 +376,8 @@ def main():
             episode_reward_history.append(episode_reward)
             if len(episode_reward_history) > AGGREGATE_STATS_EVERY: del episode_reward_history[:1]
             running_reward = np.mean(episode_reward_history)
-            episode_count += 1
+            template = "running reward: {:.2f} at episode {}, frame count {}, epsilon {}"
+            print(template.format(running_reward, episode_count, timestep_count, epsilon))
 
                 
     finally:
